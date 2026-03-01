@@ -1,0 +1,89 @@
+---
+title: "assignment.Rmd"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub) # to fetch genomes, annotations, etc.
+  library(ensembldb)     # to manipulate ensembl gene annotations
+  library(GenomicRanges) # data structure for genomic ranges 
+  library(epiwraps)      # visualization
+})
+```
+
+Using AnnotationHub, find and download the following annotations data:
+The mouse (Mus Musculus) EnsDb object, version 102, genome build GRCm38
+
+```{r}
+ah <- AnnotationHub()
+query_results <- query(ah, c("Mus musculus", "EnsDb", "102", "GRCm38"))
+query_results
+```
+
+```{r}
+annotations1 <- ah[["AH89211"]]
+annotations1
+```
+
+The mouse genome sequence ( dna_sm ) in TwoBit/2bit format for GRCm38
+
+```{r}
+query_results <- query(ah, c("Mus musculus", "dna_sm", "GRCm38", "TwoBit"))
+query_results
+query_results$rdatadateadded
+rev(query_results$ah_id)[1]
+```
+
+```{r}
+annotations2 <- ah[["AH88477"]]
+annotations2
+```
+
+The drosophila melanogaster genome sequence ( dna_sm ) in TwoBit/2bit format for BDGP6
+
+```{r}
+query_results <- query(ah, c("Drosophila melanogaster", "dna_sm", "BDGP6", "TwoBit"))
+query_results
+query_results$rdatadateadded
+rev(query_results$ah_id)[1]
+```
+
+```{r}
+annotations3 <- ah[["AH106160"]]
+annotations3
+```
+
+Using the mouse EnsDb, find the following:
+How many different ensembl gene IDs and gene symbols are there for protein-coding genes?
+
+```{r}
+mouse_genes <- genes(annotations1)
+mouse_pcg <- mouse_genes[mouse_genes$gene_biotype=="protein_coding"]
+mouse_pcg
+length(unique(mouse_pcg$gene_id))
+length(unique(mouse_pcg$gene_name))
+```
+From the output we see that there are 22287 ensembl gene IDs and 21964 gene symbols for protein-coding genes.
+
+Plot the distribution of the (spliced) length of protein-coding transcripts
+(tip: this will require you to extract exons of protein-coding transcripts from the database, and split them by transcript, before summing the width of the exons of each transcript)
+
+```{r}
+mouse_transcripts <- transcripts(annotations1)
+mouse_pct <- mouse_transcripts[mouse_transcripts$tx_biotype=="protein_coding"]
+mouse_exons_by_tx <- exonsBy(annotations1, filter = TxIdFilter(mouse_pct$tx_id))
+mouse_exons_by_tx
+```
+
+```{r}
+mouse_exon_widths <- width(mouse_exons_by_tx) 
+mouse_exon_widths
+mouse_exon_width_sum <- sum(mouse_exon_widths)
+```
+
+```{r, echo=FALSE}
+hist(mouse_exon_width_sum, main = "Histogram of the (spliced) length of protein-coding transcripts", xlab = "Length (bp)", xlim = c(0, 20000), ylim = c(0, 25000), breaks = 100)
+```
