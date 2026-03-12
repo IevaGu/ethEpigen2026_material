@@ -1,0 +1,125 @@
+---
+title: "assignment.Rmd"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub) # to fetch genomes, annotations, etc.
+  library(ensembldb)     # to manipulate ensembl gene annotations
+  library(GenomicRanges) # data structure for genomic ranges 
+  library(epiwraps)      # visualization
+  library(Rsubread)      # read alignment
+  library(rtracklayer)   # read/write genomic file formats
+  library(Biostrings)    # handling sequences
+  library(Rfastp)        # read QC/trimming
+  library(MACSr)
+})
+ah <- AnnotationHub()
+```
+
+# Downloading the raw reads (Drosophila ChIP-seq for the protein CTCF)
+
+```{r, eval = FALSE}
+options(timeout = 3600)
+
+download.file("https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz", "ctcf_chipseq.fastq.gz", mode = "wb")
+```
+
+# QC and trimming
+
+```{r}
+dir.create("rfastp.trimmed")
+
+do_qc <- function(x) {
+  Rfastp::rfastp(x, thread = 4, overrepresentationAnalysis = TRUE,
+                 outputFastq = file.path("rfastp.trimmed/", gsub("\\.fastq\\.gz$", "", basename(x))))
+}
+
+qc <- do_qc("ctcf_chipseq.fastq.gz")
+```
+
+```{r}
+Rfastp::curvePlot(qc, curve = "quality_curves")
+```
+
+# Alignment
+
+## Building a genome index for mapping
+
+```{r, eval=FALSE}
+# we get the genome sequence from AnnotationHub
+genome <- ah[["AH106160"]]
+# we create a new directory that will contain the genome index
+dir.create("BDGP6_genome")
+# we write the genome sequence in fasta format
+export(import.2bit(genome), "BDGP6_genome/genome.fasta.gz", compress=TRUE)
+# we build a Rsubread index
+Rsubread::buildindex("BDGP6_genome/rsubread", reference="BDGP6_genome/genome.fasta.gz")
+```
+
+## Alignment
+
+```{r}
+dir.create("aligned")
+align.stats <- Rsubread::align(index = "BDGP6_genome/rsubread", type = "dna",
+                               readfile1 = "rfastp.trimmed/ctcf_chipseq_R1.fastq.gz",
+                               output_file = "aligned/ctcf.bam",
+                               nthreads = 6, sortReadsByCoordinates = TRUE)
+align.stats
+```
+
+3505377 reads (91.8 %) were mapped.
+
+# Peak calling
+
+(I had a lot of trouble making this work, is there a better solution?)
+
+```{r}
+system('wsl bash -lc "cd \"/mnt/c/Users/Ieva/Desktop/Išrūšiuoti/ETH/Academics/sem2/Bioinformatic_approaches_to_regulatory_genomics_and_epigenomics/week03\" && mkdir -p peaks && ~/macs3env/bin/macs3 callpeak --outdir peaks -n ctcf --gsize dm -t aligned/ctcf.bam"')
+```
+
+```{r}
+peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+peaks
+```
+5405 peaks were found.
+
+## Finding overlaps betwen peaks and genes
+
+```{r}
+query_results <- query(ah, c("Drosophila melanogaster", "EnsDb"))
+query_results
+query_results$rdatadateadded
+```
+
+```{r}
+ensdb <- ah[["AH119285"]]
+ensdb
+```
+
+```{r}
+fly_genes <- genes(ensdb)
+fly_genes
+```
+
+```{r}
+o <- findOverlaps(peaks, fly_genes)
+head(o)
+
+overlapping_peaks = peaks
+overlapping_peaks$overlappingGenes <- NA
+overlapGenesPerRegion <- splitAsList(fly_genes$gene_name[subjectHits(o)], queryHits(o))
+overlapping_peaks$overlappingGenes[as.integer(names(overlapGenesPerRegion))] <- overlapGenesPerRegion
+
+overlapping_peaks
+```
+
+## Plotting the signal around one of the peaks that is located inside a gene:
+
+```{r}
+plotSignalTracks(list(coverage = "aligned/ctcf.bam", peaks = peaks), region = peaks[410],
+                 extend = 500, tracks.params = list(ylim = c(0, 70)))
+```
