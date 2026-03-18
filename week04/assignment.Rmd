@@ -1,0 +1,193 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+  library(GenomeInfoDb) # for matching chromosome naming styles
+})
+ah <- AnnotationHub()
+```
+
+# Downloading the data
+
+From ENCODE, we download peak data (i.e. in bed-like format) for p300, H3K27ac, and H3K27me3 in mouse embryonic stem cells (mESC, ES-Bruce4) and in a differentiated tissue (heart) from 2-month-old male adult mice. Mapping assembly: mm10. When available, “conservative IDR thresholded peaks” were downloaded, otherwise "replicated peaks".
+
+```{r, eval=FALSE}
+options(timeout=1800)
+
+download.file("https://www.encodeproject.org/files/ENCFF097ULJ/@@download/ENCFF097ULJ.bed.gz", "p300_heart.bed.gz")
+R.utils::gunzip("p300_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF653YVR/@@download/ENCFF653YVR.bed.gz", "p300_mESC.bed.gz")
+R.utils::gunzip("p300_mESC.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF723ZZS/@@download/ENCFF723ZZS.bed.gz", "H3K27ac_heart.bed.gz")
+R.utils::gunzip("H3K27ac_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF212HAG/@@download/ENCFF212HAG.bed.gz", "H3K27ac_mESC.bed.gz")
+R.utils::gunzip("H3K27ac_mESC.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF183KJW/@@download/ENCFF183KJW.bed.gz", "H3K27me3_heart.bed.gz")
+R.utils::gunzip("H3K27me3_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF105NKG/@@download/ENCFF105NKG.bed.gz", "H3K27me3_mESC.bed.gz")
+R.utils::gunzip("H3K27me3_mESC.bed.gz")
+```
+
+```{r}
+# Reading several peak files:
+# first list the files:
+peakfiles <- list.files(full.names = TRUE, pattern = ".bed")
+# then give them meaningful names
+names(peakfiles) <- gsub("\\.bed","",basename(peakfiles))
+# then loop through them and read them:
+peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+```
+
+```{r}
+query_results <- query(ah, c("Mus musculus", "EnsDb", "GRCm38"))
+query_results
+```
+
+```{r}
+ensdb <- ah[["AH89211"]]
+ensdb
+```
+
+# Comparing p300, H3K27ac, and H3K27me3 signals across the two tissues
+
+## What is the proportion of TSS that overlap H3K27ac, H3K27me3, and the combination of both, in each tissue?
+
+```{r}
+mouse_transcripts <- transcripts(ensdb)
+mouse_transcripts
+```
+
+```{r}
+# Identifying TSS: the start of the transcript range on the + strand and the end of the transcript range on the - strand
+tss <- promoters(mouse_transcripts, upstream = 0, downstream = 1)
+tss
+```
+
+```{r}
+# Making chromosome naming styles of tss and peaks match 
+seqlevelsStyle(tss) <- "UCSC"
+# Discarding TSS that do not belong to standard chromosomes (scaffolds, mitochondria)
+tss <- keepStandardChromosomes(tss, pruning.mode="coarse")
+tss <- tss[seqnames(tss) != "chrM"]
+```
+
+```{r}
+overlaps <- lapply(peaks, function(x) {
+  o <- findOverlaps(tss, x, type = "within")
+  o
+})
+```
+
+```{r}
+print ("The proportion of TSS that overlap H3K27ac/H3K27me3 in heart/MESC:")
+total_tss = length(tss)
+lapply(overlaps[1:4], function(x) {
+  overlapping_tss = length(x)
+  overlapping_tss / total_tss
+})
+```
+
+```{r}
+tss_H3K27ac_heart = countOverlaps(tss, peaks$H3K27ac_heart)
+tss_H3K27me3_heart = countOverlaps(tss, peaks$H3K27me3_heart)
+tss_H3K27ac_mESC = countOverlaps(tss, peaks$H3K27ac_mESC)
+tss_H3K27me3_mESC = countOverlaps(tss, peaks$H3K27me3_mESC)
+
+tss_both_heart <- tss[tss_H3K27ac_heart & tss_H3K27me3_heart]
+tss_both_mESC <- tss[tss_H3K27ac_mESC & tss_H3K27me3_mESC]
+
+print("The proportion of TSS that overlap both H3K27ac and H3K27me3 in heart/MESC:")
+print(paste0("H3K27ac_H3K27me3_heart: ", length(tss_both_heart) / total_tss))
+print(paste0("H3K27ac_H3K27me3_mESC: ", length(tss_both_mESC) / total_tss))
+```
+
+## What is the relationship between the 3 signals (p300, H3K27ac, and H3K27me3), and is it the same in both tissues?
+
+```{r}
+peaks <- lapply(peaks, function(x) {
+  seqlevelsStyle(x) <- "NCBI"
+  x
+})
+
+peaks_annotated <- lapply(peaks, function(x) {
+  annotateRegions(x, ensdb)
+})
+```
+
+```{r}
+lapply(peaks_annotated, function(x) {
+  table(x$class)
+})
+```
+
+```{r}
+peaks_heart = peaks[grepl("heart", names(peaks))]
+peaks_mESC = peaks[grepl("mESC", names(peaks))]
+```
+
+```{r}
+# Visualizing overlaps between peaks in the heart
+# As a heatmap of overlaps:
+regionOverlaps(peaks_heart)
+# As an upset plot:
+tmp <- regionsToUpset(peaks_heart, nsets=length(peaks_heart))
+UpSet(make_comb_mat(regionsToUpset(peaks_heart, nsets=length(peaks_heart))))
+```
+
+```{r}
+# Visualizing overlaps between peaks in mESC
+# As a heatmap of overlaps:
+regionOverlaps(peaks_mESC)
+# As an upset plot:
+tmp <- regionsToUpset(peaks_mESC, nsets=length(peaks_mESC))
+UpSet(make_comb_mat(regionsToUpset(peaks_mESC, nsets=length(peaks_mESC))))
+```
+
+## What is the relationship between regulatory elements active in mESC and in the differentiated tissue?
+
+```{r}
+peaks_p300 = peaks[grepl("p300", names(peaks))]
+peaks_H3K27ac = peaks[grepl("H3K27ac", names(peaks))]
+peaks_H3K27me3 = peaks[grepl("H3K27me3", names(peaks))]
+```
+
+```{r}
+# Visualizing overlaps between p300 peaks in the heart and mESC
+# As an upset plot:
+tmp <- regionsToUpset(peaks_p300, nsets=length(peaks_p300))
+UpSet(make_comb_mat(regionsToUpset(peaks_p300, nsets=length(peaks_p300))))
+```
+
+```{r}
+# Visualizing overlaps between H3K27ac peaks in the heart and mESC
+# As an upset plot:
+tmp <- regionsToUpset(peaks_H3K27ac, nsets=length(peaks_H3K27ac))
+UpSet(make_comb_mat(regionsToUpset(peaks_H3K27ac, nsets=length(peaks_H3K27ac))))
+```
+
+```{r}
+# Visualizing overlaps between H3K27me3 peaks in the heart and mESC
+# As an upset plot:
+tmp <- regionsToUpset(peaks_H3K27me3, nsets=length(peaks_H3K27me3))
+UpSet(make_comb_mat(regionsToUpset(peaks_H3K27me3, nsets=length(peaks_H3K27me3))))
+```
+
+# Observations
+
+The above analysis offers several insights into the relationship between p300, H3K27ac, and H3K27me3 signals in differentiated and undifferentiated cells. Notably, p300 and H3K27ac peaks showed greater overlap than H3K27me3 peaks with either of the two signals. This pattern was observed in both the mESC and differentiated tissue datasets. It likely reflects the fact that p300 is a histone acetyltransferase that promotes H3K27ac deposition. It is well established that H3K27ac and H3K27me3 are mutually exclusive histone modifications: H3K27ac marks active enhancers and transcription start sites (TSS), whereas H3K27me3 is associated with repressed functional elements. In accordance to this, TSS analysis also showed limited overlap between H3K27ac and H3K27me3 signals. Additionally, TSS were more strongly associated with H3K27ac than with H3K27me3. Signal comparison between differentiated and undifferentiated cells showed relatively little overlap in signals between the two cell states. This is expected, as differentiation leads to significant changes in transcription and regulatory element activity, which manifests as different patterns of histone modifications and the binding of DNA-associated proteins like p300. Some overlap between the differentiated and undifferentiated states should be expected due to, for example, constant activity of housekeeping genes. 
