@@ -46,6 +46,13 @@ group <- factor(group)
 colData(peaks)$group <- group
 ```
 
+Giving the rows meaningful names:
+
+```{r}
+rr <- rowRanges(peaks)
+rownames(peaks) <- paste0(as.character(seqnames(rr)), ":", start(rr), "-", end(rr))
+```
+
 Performing differential analysis:
 
 ```{r}
@@ -82,7 +89,7 @@ sechm(peaks, topRegions_group, assayName = "logcpm_group", gaps_at = "group", sh
 The top 10 most significant regions for group status:
 
 ```{r}
-rowRanges(peaks)[as.integer(topRegions_group)]
+rowRanges(peaks)[topRegions_group]
 ```
 
 Looks like there is one outlier (Control_female_GSM6041843.bam) that biases the differential analysis. However, it would not be a good idea to exclude the sample based solely on the heatmap. The proper approach would be, in order of priority:
@@ -139,7 +146,7 @@ sechm(peaks_subset, topRegions_group_subset, assayName = "logcpm_group", gaps_at
 The top 10 most significant regions for group status:
 
 ```{r}
-rowRanges(peaks_subset)[as.integer(topRegions_group_subset)]
+rowRanges(peaks_subset)[topRegions_group_subset]
 ```
 
 ## Comparing male and female animals
@@ -186,7 +193,7 @@ sechm(peaks, topRegions_sex, assayName = "logcpm_sex", gaps_at = "sex")
 The top 10 most significant regions for sex:
 
 ```{r}
-rowRanges(peaks)[as.integer(topRegions_sex)]
+rowRanges(peaks)[topRegions_sex]
 ```
 
 As expected, all of these regions are located on the X chromosome or the Y chromosome.
