@@ -1,0 +1,192 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+  library(GenomeInfoDb) # for matching chromosome naming styles
+  library(SummarizedExperiment)
+  library(edgeR) # differential gene expression using neg.bin stats
+  library(sechm) # for plotting (features*samples) heatmaps
+})
+ah <- AnnotationHub()
+```
+
+# Downloading the data
+Downloading ATAC-seq peak counts in the hippocampus upon stress (a subset of the original data, already in SummarizedExperiment format). The data is from the mouse ensembl GRCm38 genome.
+
+```{r, eval=FALSE}
+options(timeout=1800)
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "ATACseq_peaks.peakCounts.SE.rds")
+```
+Reading peak file:
+
+```{r}
+peaks <- readRDS("ATACseq_peaks.peakCounts.SE.rds")
+```
+
+# Differential analysis with edgeR
+
+## Comparing stressed (denoted ‘FSS’ – forced swim stress) and control animals
+
+Defining groups in the data set:
+
+```{r}
+group <- ifelse(grepl("Control", colnames(peaks)), "Control", "FSS")
+group <- factor(group)
+colData(peaks)$group <- group
+```
+
+Performing differential analysis:
+
+```{r}
+# Putting the data in the object structure used by edgeR:
+dds_group <- edgeR::DGEList(assay(peaks), group=peaks$group)
+# Normalizing using default TMM normalization:
+dds_group <- edgeR::calcNormFactors(dds_group)
+# When testing differences, it is not enough to know if means are different; we want to see if means are different relative to variability. That's why estimating dispersions is necessary: 
+dds_group <- edgeR::estimateDisp(dds_group)
+# Performing differential analysis:
+et_group <- as.data.frame(topTags(exactTest(dds_group), Inf))
+head(et_group)
+```
+
+Looking at the results:
+
+```{r}
+head(et_group)
+ggplot(et_group, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+Looking at the top differentially-bound peaks:
+
+```{r}
+# Placing the normalized data back into our original SummarizedExperiment object:
+rownames(peaks) <- rownames(edgeR::cpm(dds_group))
+assay(peaks, "logcpm_group") <- log1p(cpm(dds_group))
+# Plotting the 10 most significant regions:
+topRegions_group <- head(row.names(et_group), 10)
+sechm(peaks, topRegions_group, assayName = "logcpm_group", gaps_at = "group")
+sechm(peaks, topRegions_group, assayName = "logcpm_group", gaps_at = "group", show_colnames = TRUE)
+```
+
+The top 10 most significant regions for group status:
+
+```{r}
+rowRanges(peaks)[as.integer(topRegions_group)]
+```
+
+Looks like there is one outlier (Control_female_GSM6041843.bam) that biases the differential analysis. However, it would not be a good idea to exclude the sample based solely on the heatmap. The proper approach would be, in order of priority:
+
+- Checking for corrections of ATAC-seq data, which is prone to technical biases.
+
+- If the sample is technically bad, then this should show in some metrics that are independent of the experimental design. If such metrics unambiguously show it as an outlier, we may exclude it.
+
+- Using surrogate variable analysis or some derivative of it.
+
+Let's check what happens if we exclude the sample just for the fun of it.
+
+### Differential analysis after removing the sample Control_female_GSM6041843.bam
+
+Subsetting the SummarizedExperiment object:
+
+```{r}
+peaks_subset <- peaks[, -3]
+colnames(peaks_subset)
+```
+
+Performing differential analysis:
+
+```{r}
+# Putting the data in the object structure used by edgeR:
+dds_group_subset <- edgeR::DGEList(assay(peaks_subset), group=peaks_subset$group)
+# Normalizing using default TMM normalization:
+dds_group_subset <- edgeR::calcNormFactors(dds_group_subset)
+# When testing differences, it is not enough to know if means are different; we want to see if means are different relative to variability. That's why estimating dispersions is necessary: 
+dds_group_subset <- edgeR::estimateDisp(dds_group_subset)
+# Performing differential analysis:
+et_group_subset <- as.data.frame(topTags(exactTest(dds_group_subset), Inf))
+head(et_group_subset)
+```
+
+Looking at the results:
+
+```{r}
+head(et_group_subset)
+ggplot(et_group_subset, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+Looking at the top differentially-bound peaks:
+
+```{r}
+# Placing the normalized data back into our original SummarizedExperiment object:
+rownames(peaks_subset) <- rownames(edgeR::cpm(dds_group_subset))
+assay(peaks_subset, "logcpm_group") <- log1p(cpm(dds_group_subset))
+# Plotting the 10 most significant regions:
+topRegions_group_subset <- head(row.names(et_group_subset), 10)
+sechm(peaks_subset, topRegions_group_subset, assayName = "logcpm_group", gaps_at = "group")
+```
+
+The top 10 most significant regions for group status:
+
+```{r}
+rowRanges(peaks_subset)[as.integer(topRegions_group_subset)]
+```
+
+## Comparing male and female animals
+
+Defining groups in the data set:
+
+```{r}
+sex <- ifelse(grepl("female", colnames(peaks)), "female", "male")
+sex <- factor(sex)
+colData(peaks)$sex <- sex
+```
+
+Performing differential analysis:
+
+```{r}
+# Putting the data in the object structure used by edgeR:
+dds_sex <- edgeR::DGEList(assay(peaks), group=peaks$sex)
+# Normalizing using default TMM normalization:
+dds_sex <- edgeR::calcNormFactors(dds_sex)
+# When testing differences, it is not enough to know if means are different; we want to see if means are different relative to variability. That's why estimating dispersions is necessary: 
+dds_sex <- edgeR::estimateDisp(dds_sex)
+# Performing differential analysis:
+et_sex <- as.data.frame(topTags(exactTest(dds_sex), Inf))
+head(et_sex)
+```
+
+Looking at the results:
+
+```{r}
+head(et_sex)
+ggplot(et_sex, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+Looking at the top differentially-bound peaks:
+
+```{r}
+# Placing the normalized data back into our original SummarizedExperiment object:
+assay(peaks, "logcpm_sex") <- log1p(cpm(dds_sex))
+# Plotting the 10 most significant regions:
+topRegions_sex <- head(row.names(et_sex), 10)
+sechm(peaks, topRegions_sex, assayName = "logcpm_sex", gaps_at = "sex")
+```
+
+The top 10 most significant regions for sex:
+
+```{r}
+rowRanges(peaks)[as.integer(topRegions_sex)]
+```
+
+As expected, all of these regions are located on the X chromosome or the Y chromosome.
