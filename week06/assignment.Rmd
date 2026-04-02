@@ -1,0 +1,116 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+  library(GenomeInfoDb) # for matching chromosome naming styles
+  library(SummarizedExperiment)
+  library(edgeR) # differential gene expression using neg.bin stats
+  library(sechm) # for plotting (features*samples) heatmaps
+  library(memes) # for the meme-based methods
+  library(motifmatchr) # for scanning sequences for matches of given motifs
+  library(Biostrings) # for handling sequences
+  library(MotifDb) # database of motifs
+  library(TFBSTools) # for handling some motif formats
+  library(universalmotif) # for converting motifs to various formats
+  library(PWMEnrich) # for R-based motif enrichment analysis
+  library(AnnotationHub)
+})
+ah <- AnnotationHub()
+```
+
+# Downloading the data
+Downloading TF REST peak counts in liver tissue of male adult Homo sapiens with non-obstructive coronary artery disease.
+
+```{r, eval=FALSE}
+download.file("https://www.encodeproject.org/files/ENCFF044GNV/@@download/ENCFF044GNV.bed.gz", "REST_peaks.bed.gz")
+```
+
+```{r}
+peaks <- rtracklayer::import("REST_peaks.bed.gz", format="NarrowPeak")
+seqlevelsStyle(peaks) <- "Ensembl"  # to change the convention of the chromosome names to ensembl
+```
+
+Downloading the GRCh38 genome assembly:
+
+```{r}
+query_results <- AnnotationHub::query(ah, c("Homo sapiens", "GRCh38", "dna_sm", "TwoBit"))
+query_results
+```
+
+```{r}
+genome <- ah[["AH106285"]]
+genome_seqs <- import(genome)
+```
+
+# Motif scanning
+
+Motif scanning aims at finding the occurrences of a known motif (i.e motif 'matches') in a set of sequences.
+
+## Getting the desired motif
+
+```{r}
+# we search for "REST" in the motif database
+motifs <- MotifDb::query(MotifDb, c("REST"))
+# there are several matching motifs:
+names(motifs)
+```
+
+```{r}
+# we select one motif:
+motif <- motifs[["Hsapiens-HOCOMOCOv10-REST_HUMAN.H10MO.A"]]
+motif
+# we visualize it:
+view_motifs(motifs[1])
+```
+
+## Using motifmatchr:
+
+```{r}
+# we need to convert the motif to a format that this package will accept
+motif_formatted <- convert_motifs(motif, class="TFBSTools-PWMatrix")
+moi <- motifmatchr::matchMotifs(motif_formatted, subject=peaks, genome=genome_seqs, out="positions") # we specify that the function should return the genomic positions of each motif match
+# we scanned for just one motif, so we get the results for that motif
+moi <- moi[[1]]
+head(moi)
+hist(moi$score)
+```
+
+```{r}
+# of all the peaks, what proportion contains a motif for the factor?
+table(overlapsAny(peaks, moi))
+print(paste0("Total peaks: ", length(peaks)))
+```
+
+Of the 36521 peaks, 5774 (15.81%) contain a motif
+
+## Scanning the whole genome
+
+To scan the whole genome, one needs to use the genome sequence as input subject.
+
+```{r}
+# run the scan:
+motif_across_genome <- matchMotifs(motif_formatted, subject=genome_seqs, out="positions")[[1]]
+# when inputing matchMotifs directly with sequences, one has to do the following 
+# to transform the output to GRanges:
+names(motif_across_genome) <- names(genome_seqs)
+motif_across_genome <- as(motif_across_genome, "GRanges")
+head(motif_across_genome)
+```
+
+```{r}
+# of all instances of the motif in the genome, what proportion is bound by the factor (i.e. has a peak)?
+table(overlapsAny(motif_across_genome, peaks, type="within"))
+print(paste0("Total instances: ", length(motif_across_genome)))
+```
+
+Of the 567090 motif instances, 6900 (1.22%) overlap a peak
