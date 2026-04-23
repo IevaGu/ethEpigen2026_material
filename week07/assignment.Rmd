@@ -1,0 +1,189 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(memes)
+  library(universalmotif)
+  library(ensembldb)
+  library(ggplot2)
+  library(motifmatchr)
+  library(sechm)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(limma)
+  library(betterChromVAR)
+})
+
+ah <- AnnotationHub(localHub = FALSE)
+ensdb <- ah[["AH89211"]] # mouse ensembldb object
+```
+
+# Part 1
+
+## Downloading the data
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam", "atac.chr19.bam", mode="wb")
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.bam.bai", mode="wb")
+```
+
+## Preparing tracks
+
+```{r}
+bam <- "atac.chr19.bam"
+
+# create a track using all fragments, computing the coverage at each position (and force Ensembl naming)
+epiwraps::bam2bw(bam, output_bw = "full_cov.bw", paired=TRUE, binWidth=10L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using all fragments, but computing the number of cuts/insertion sites at each position
+bam2bw(bam, output_bw = "full_cuts.bw", paired=TRUE, binWidth=1L, type="ends", 
+                 trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only nucleosome-free fragments, computing coverage
+bam2bw(bam, output_bw = "NF_cov.bw", paired=TRUE, binWidth=5L, minFragLength=30, 
+       maxFragLength=120, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only nucleosome-free fragments, the number of cuts/insertion sites at each position
+bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", minFragLength=30, 
+       maxFragLength=120, trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only mono-nucleosome fragments, computing coverage
+bam2bw(bam, output_bw = "mono_cov.bw", paired=TRUE, binWidth=10L, minFragLength=140,
+       maxFragLength=220, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only the (10bp) centers of mono-nucleosome fragments
+bam2bw(bam, output_bw = "mono_centers.bw", paired=TRUE, binWidth=5L, minFragLength=140, trim=4L,
+       maxFragLength=220, type="center", extend=10L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only the (10bp) centers of nucleosome-containing fragments
+```
+
+## Obtaining the sites with a REST motif
+
+```{r}
+# get REST motif
+motif <- MotifDb::query(MotifDb, c("REST","Mus"))[[1]]
+motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
+genome <- ah[["AH68356"]]
+# get the sequence for chr19:
+chr19 <- import(genome)["19"]
+
+# find motif matches across chr19
+moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
+# convert to GRanges
+moi <- as(setNames(moi,names(chr19)), "GRanges")
+```
+
+## Plotting signal around the motif occurences
+Here we plot the insertion (i.e. ‘cuts’) profile of nucleosome-free fragments and the centers of nucleosome-containing fragments around the high-confidence motifs of TF REST.
+
+```{r, fig.width=8, fig.height=4}
+# we prepare the list of tracks
+tracks <- list.files(pattern="bw$")
+names(tracks) <- gsub("\\.bw","",basename(tracks))
+
+# extract signals around the motif occurences
+# we zoom in to 300bp around the motif centers, in windows of 5bp
+sm <- signal2Matrix(tracks[c("NF_cuts", "mono_centers")] , moi, w=5, extend=300)
+
+# plot the signals:
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0")
+```
+Here we overlay the two signals, aggregated across regions:
+
+```{r}
+d <- meltSignals(sm[,c("NF_cuts", "mono_centers")])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2)
+```
+
+# Part 2
+
+## Downloading the data
+We will use mouse hippocampus ATAC-seq data:
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+```
+
+```{r}
+se <- readRDS("peakCounts.rds")
+```
+
+The object contains fragment counts in peaks across control and stressed samples.
+
+## Region annotation
+For what follows, it's important that the regions be similarly-sized. We therefore resize the regions.
+
+```{r}
+resize(se, width=300, fix="center")
+```
+
+Here we determine the GC content of the regions.
+
+```{r}
+# we restrict the regions to standard chromosomes and change the seq level style to match the genome
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
+```
+
+Here we determine which motif matches each region. For the annotation, we first need to get a list of motifs, and then scan the regions for matches to them.
+
+```{r}
+motifs <- query(MotifDb, "HOCOMOCOv13")
+```
+
+Here we convert the motifs to a format that `motifmatchr` accepts.
+
+```{r, message=FALSE}
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
+```
+
+We then scan regions for matches of the motifs:
+
+```{r}
+matches <- motifmatchr::matchMotifs(motifs, se, genome=BSgenome.Mmusculus.UCSC.mm10)
+matches
+```
+
+The output is a SummarizedExperiment object, where columns are the motifs and the rows are the regions, and the assay is a logical sparse matrix.
+
+```{r}
+assay(matches)[1:10,1:20]
+```
+
+## Getting motif deviations
+(Motif deviation = how much accessibility around a motif differs from expectation)
+
+```{r}
+dev <- betterChromVAR(se, matches)
+dev
+```
+
+The output is a SummarizedExperiment object, where columns are the samples and the rows are the motifs. The values represent the relative accessibility of each motif in each sample. The motif deviations can be used to perform differential analysis.
+
+## Differential analysis
+Here we identify motifs that change in accessibility between males and females.
+
+```{r}
+dev$group <- ifelse(grepl("female", colnames(dev)), "Female", "Male")
+design <- model.matrix(~group, data=as.data.frame(colData(dev)))
+fit <- eBayes(lmFit(assay(dev, "z"), design))
+res <- as.data.frame(topTable(fit, number = Inf))
+res$motif <- row.names(res)
+ggplot(res, aes(logFC, -log10(adj.P.Val), label=motif)) + geom_text()
+```
+
+Plotting a heatmap of the deviations for the top few candidate motifs.
+
+```{r}
+sechm(dev, head(row.names(res)), gaps_at="group", assayName = "z")
+```
