@@ -1,0 +1,148 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(edgeR)
+  library(rtracklayer)
+  library(BiocParallel)
+  library(GenomicRanges)
+  library(bsseq)   # Class and tools to analyze bisulfite sequencing data at CpG-level
+  library(DMRcate) # Identification of differentially-methylated regions
+})
+ah <- AnnotationHub()
+```
+
+# Downloading the data
+
+```{r, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
+unzip("w11_practical.zip")
+```
+
+```{r, eval=FALSE}
+# differential accessibility results for the 2nd part of the task:
+options(timeout = 6000)
+download.file("https://www.ethz-ins.org/content/ATAC_AstroVsESC_subset.rds", "diff_accessibility.rds")
+```
+
+# Differential Methylation Testing
+
+## Bsseq object
+
+We will use a BSseq object that contains data from embryonic stem cells (ESC) and astrocytes.
+
+```{r, warning=FALSE}
+bs <- readRDS("ESC_astrocytes_BSseq.rds")
+bs
+
+# remove CpGs that have 0 coverage in some samples:
+bs <- bs[rowSums(assay(bs,"Cov")>0)==ncol(bs),]
+
+design <- model.matrix(~celltype, data=pData(bs)) 
+design
+# adapt the design for methylation data:
+methdesign <- modelMatrixMeth(design)
+
+bs <- BSmooth(bs, BPPARAM=MulticoreParam(4, progress=TRUE))
+```
+
+## Testing each CpG individually
+
+```{r}
+# CpG-level tests:
+seqAnnot <- sequencing.annotate(bs, methdesign, all.cov=TRUE, coef="celltypeastrocytes")
+
+# look at the top most significant CpGs:
+res <- seqAnnot@ranges
+res <- res[order(res$ind.fdr),]
+head(res)
+
+# visualize them across samples:
+metCpGs <- bsseq::getMeth(bs, regions=head(res,20), what="perRegion")
+colnames(metCpGs) <- colnames(bs)
+pheatmap(metCpGs, name="methylation")
+```
+
+## Differentially-methylated regions (DMRs)
+
+Identifying broader regions of coherent changes:
+
+```{r}
+dmrcateRes <- dmrcate(seqAnnot, C=2, min.cpgs=5)
+dmrRanges <- extractRanges(dmrcateRes, genome="hg19")
+saveRDS(dmrRanges, "dmr.rds")
+
+ggplot(as.data.frame(dmrRanges), aes(meandiff, -log10(HMFDR), colour=width, size=no.cpgs)) + geom_point()
+
+dmrRanges <- dmrRanges[order(abs(dmrRanges$meandiff), decreasing=TRUE)]
+```
+
+Here we plot a heatmap of the methylation levels of the genes in top 5 differentially methylated regions (DMR) located on chr1.
+
+```{r}
+# isolating chr1, selecting the top 5 DMRs
+dmr_chr1 <- dmrRanges[seqnames(dmrRanges) %in% c("chr1")]
+top_dmr_chr1 <- dmr_chr1[1:5]
+
+# plotting just the top 5 DMRs
+met_DMR <- bsseq::getMeth(bs, regions=top_dmr_chr1, what="perRegion")
+rownames(met_DMR) <- paste0(as.character(seqnames(top_dmr_chr1)), ":", start(top_dmr_chr1), "-", end(top_dmr_chr1))
+pheatmap(met_DMR, name="methylation\nlevel")
+```
+
+```{r}
+# getting overlapping genes
+gene_names <- top_dmr_chr1$overlapping.genes
+gene_names <- gene_names[!is.na(gene_names)]
+gene_names <- strsplit(gene_names, ", ")
+gene_names <- unique(unlist(gene_names))
+
+# finding the ranges of the genes
+hg19_genes <- readRDS("hg19_chr1_genes.rds")
+top_genes <- hg19_genes[hg19_genes$symbol %in% gene_names]
+# only 2 out of 4 genes of interest were found
+```
+
+```{r}
+# visualizing methylation of genes in top 5 DMRs
+met_genes <- bsseq::getMeth(bs, regions=top_genes, what="perRegion")
+rownames(met_genes) <- top_genes$symbol
+pheatmap(met_genes, name="methylation\nlevel")
+```
+
+# Comparing changes in methylation to accessibility changes
+
+```{r}
+diff_access <- readRDS("diff_accessibility.rds")
+
+# filtering based on significance:
+diff_access <- diff_access[diff_access$FDR < 0.05]
+diff_access
+dmrRanges <- dmrRanges[dmrRanges$HMFDR < 0.05]
+dmrRanges
+```
+
+```{r}
+# adding group labels:
+dmrRanges$group = ifelse(dmrRanges$meandiff > 0, "astrocytes_more_methylated", "ESC_more_methylated")
+diff_access$group = ifelse(diff_access$logFC > 0, "astrocytes_more_accessible", "ESC_more_accessible")
+```
+
+```{r}
+regions <- list(Demethylation_with_differentiation = dmrRanges[dmrRanges$group == "ESC_more_methylated"], Methylation_with_differentiation = dmrRanges[dmrRanges$group == "astrocytes_more_methylated"], Inaccessibility_with_differentiation = diff_access[diff_access$group == "ESC_more_accessible"], Accessibility_with_differentiation = diff_access[diff_access$group == "astrocytes_more_accessible"])
+
+# visualizing overlaps between accessible/methylated regions using a heatmap of overlaps:
+regionOverlaps(regions)
+```
+
+To assess the extent of agreement between changes in chromatin accessibility and DNA methylation during cell differentiation, I split the DMR and differential accessibility regions based on the direction of change (higher signal in ESCs vs higher signal in differentiated cells). I then visualized the overlaps between these groups using a heatmap. I expected to see an inverse relationship between the two modalities, i.e. regions that are more methylated in one cell type would tend to be less accessible in that same cell type and more accessible in the other. The hypothesis emerges from DNA methylation being linked to gene silencing. The heatmap supports this hypothesis: we observe the highest overlap coefficients between regions that are highly methylated in one cell type and highly accessible in the other. Overall, changes in methylation seem to be inversely related to changes in accessibility during differentiation.
