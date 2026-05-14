@@ -1,0 +1,196 @@
+---
+title: "assignment"
+author: "Ieva Gudelytė"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT) # Gene Ontology enrichment among genomic regions
+})
+```
+
+# Downloading the data
+
+The zip file contains bigwig files and peaks (bed) files for three TFs of the CREB family (all restricted to chr1; aligned against the hg38 genome)
+
+```{r, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/clustering_assignment.zip", "clustering_assignment.zip")
+unzip("clustering_assignment.zip")
+list.files()
+```
+
+# Preparing the regions and tracks
+
+To get a clearer picture, we focus on high-confidence peaks from each factor to define the universe of regions
+
+```{r}
+tracks <- list.files(pattern="bw$")
+
+# importing the peaks
+peaks <- list.files(pattern="bed$")
+peaks <- lapply(peaks, rtracklayer::import.bed)
+# we'll focus on the high-quality peaks
+peaks <- lapply(peaks, FUN=function(x) x[x$score>800])
+# we combine all peak sets into one GRanges object, merge overlapping or directly adjacent peak intervals, and obtain a non-redundant set of genomic regions
+regions <- reduce(unlist(GRangesList(peaks)))
+```
+
+# Investigating the relationships between the binding of Creb1, Creb3, and Creb3L1 proteins
+
+We use clustering and visualization to illustrate these relationships
+
+```{r}
+ese <- signal2Matrix(tracks, regions, extend=2000)
+plotEnrichedHeatmaps(ese)
+```
+
+Simply plotting the regions, the signals seem very similar… but are they? We take the first 1000 regions plotted above, make a heatmap of their signal profiles, cluster similar signal patterns together, and show the clustering tree.
+
+```{r}
+ese2 <- ese[1:1000,]
+plotEnrichedHeatmaps(ese2, cluster_rows = TRUE, show_row_dend=TRUE )
+```
+
+## Clustering
+
+```{r}
+# we set a seed for reproducibility
+set.seed(123)  
+
+# trying different numbers of clusters:
+cluster_test <- clusterSignalMatrices(ese, k=2:10)
+ggplot(cluster_test$varExplained, aes(k, varExplained)) + geom_line()
+```
+
+```{r}
+# we set a seed for reproducibility
+set.seed(123)  
+
+# based on the plot above, 6 clusters seems like a good choice
+cl <- clusterSignalMatrices(ese, k=6)
+# cl is a cluster assignment vector
+# counting how many regions were assigned to each cluster:
+table(cl)
+# showing the cluster labels of the first 6 regions
+head(cl)
+
+# to make sure the cluster labels stay associated with the corresponding regions/rows even if we manipulate the object, put them inside the rowData of the object:
+rowData(ese)$cluster <- cl
+head(rowData(ese))
+```
+
+```{r}
+# plotting the clusters
+# adding colors:
+mycolors <- c("1"="black", "2"="orange", "3"="skyblue", "4"="#009E73", "5"="yellow", "6"="blue")
+plotEnrichedHeatmaps(ese, row_split=rowData(ese)$cluster, mean_color=mycolors)
+```
+
+
+
+```{r}
+# plotting just the averages:
+d <- meltSignals(ese, splitBy=cl)
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + facet_wrap(~split)
+```
+
+```{r}
+# clustering using relative signal instead
+# we set a seed for reproducibility
+set.seed(123)
+
+# trying different numbers of clusters:
+cluster_test2 <- clusterSignalMatrices(ese, k=2:10, scaleRows = TRUE)
+ggplot(cluster_test2$varExplained, aes(k, varExplained)) + geom_line()
+```
+
+```{r}
+# we set a seed for reproducibility
+set.seed(123)
+
+# based on the plot above, 6 clusters seems like a good choice
+cl_relative <- clusterSignalMatrices(ese, k=6, scaleRows = TRUE)
+
+# to make sure the cluster labels stay associated with the corresponding regions/rows even if we manipulate the object, put them inside the rowData of the object:
+rowData(ese)$cluster_relative <- cl_relative
+head(rowData(ese))
+
+d <- meltSignals(ese, splitBy=cl_relative)
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + facet_wrap(~split)
+mycolors <- c("1"="black", "2"="orange", "3"="skyblue", "4"="#009E73", "5"="yellow", "6"="blue")
+plotEnrichedHeatmaps(ese, row_split=rowData(ese)$cluster_relative, scale_rows = "global", mean_color=mycolors)
+```
+
+# Enrichment analysis
+
+Here we find what's enriched in one cluster with respect to the others.
+
+## Using unscaled signal 
+
+```{r}
+# we first split the regions by cluster:
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster)
+lengths(split_regions)
+
+# running GREAT-style enrichment analysis on cluster 3 regions 
+# we use the human hg38 genome annotation to link regions to nearby genes/TSSs
+# gene_sets="GO:BP" specifies that we test enrichment for Gene Ontology Biological Process terms
+res_3 <- great(split_regions[["3"]], gene_sets="GO:BP", tss_source="hg38", 
+             background=regions, cores=2)
+bp_3 <- getEnrichmentTables(res_3)
+bp_3 <- bp_3[order(bp_3$p_adjust), ]
+head(bp_3, 15)
+
+# same for cluster 2:
+res_2 <- great(split_regions[["2"]], gene_sets="GO:BP", tss_source="hg38", 
+             background=regions, cores=2)
+bp_2 <- getEnrichmentTables(res_2)
+bp_2 <- bp_2[order(bp_2$p_adjust), ]
+head(bp_2, 15)
+```
+
+```{r, fig.width=9, fig.height=6}
+# we plot the top Biological Processes for cluster 3:
+ggplot(head(bp_3, 15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c()
+
+# same for cluster 2:
+ggplot(head(bp_2, 15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c()
+```
+
+## Using scaled signal
+
+```{r}
+# we first split the regions by cluster:
+split_regions_relative <- split(rowRanges(ese), rowData(ese)$cluster_relative)
+lengths(split_regions_relative)
+
+# running GREAT-style enrichment analysis on cluster 3 regions 
+# we use the human hg38 genome annotation to link regions to nearby genes/TSSs
+# gene_sets="GO:BP" specifies that we test enrichment for Gene Ontology Biological Process terms
+res_relative <- great(split_regions_relative[["3"]], gene_sets="GO:BP", tss_source="hg38", 
+             background=regions, cores=2)
+bp_relative <- getEnrichmentTables(res_relative)
+bp_relative <- bp_relative[order(bp_relative$p_adjust), ]
+head(bp_relative, 15)
+```
+
+```{r, fig.width=9, fig.height=6}
+# we plot the top Biological Processes:
+ggplot(head(bp_relative,15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c()
+```
+
+# Discussion
+
+The signals produced by Creb1, Creb3, and Creb3L1 appear highly similar when visualized together. However, clustering reveals more complex relationships between these TFs. In the unscaled analysis, Creb1 and Creb3L1 frequently cluster together, suggesting that they share similar patterns of absolute signal strength across many regions, whereas Creb3 appears more distinct. When clustering is performed on scaled data, the association between Creb1 and Creb3L1 becomes weaker, which suggests that the previously observed correlations were driven partly by signal magnitude rather than purely by profile shape. GO enrichment analysis of clusters in which Creb3 is the dominant signal shows enrichment for several immune response-related biological processes. Although clusters derived from scaled and unscaled data cannot be directly compared, a strong Creb3 signal appears to be associated with immune-related processes in both analyses. 
